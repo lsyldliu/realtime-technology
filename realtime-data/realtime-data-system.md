@@ -1,4 +1,4 @@
-# 实时数据体系建设思考
+# 实时数据体系建设的一点思考
 
 ## 前言
 
@@ -7,10 +7,11 @@
 对企业的决策运营策略调整有很大帮助。此外，随着5G技术的成熟、广泛应用，
 对于工业互联网、物联网等数据时效性要求非常高的行业，企业就更需要一套完整成熟的
 实时数据体系来提高自身的行业竞争力。
-本文从上述现状及实时数据需求出发，结合工业界案例、笔者自身的工作经验，
-梳理总结了实时数据体系建设的大致方案，本文主要分为两个部分，
+本文从上述现状及实时数据需求出发，结合工业界案例、笔者一年多的实时数据开发经验，
+梳理总结了实时数据体系建设的总体方案，本文主要分为三个部分，
 第一部分主要介绍了当下在工业界比较火热的实时计算引擎Flink在实时数据体系建设过程中主要的应用场景及对应解决方案；
-第二部分从实时数据体系架构、实时数据模型分层、实时数据体系建设方式、流批一体实时数据架构发展等四个方面思考了实时数据体系建设的规划方案。
+第二部分从实时数据体系架构、实时数据模型分层、实时数据体系建设方式、流批一体实时数据架构发展等四个方面思考了实时数据体系的建设方案；
+第三部分则以一个具体案例介绍如何使用Flink SQL完成实时数据统计类需求。
 
 ## 一、Flink实时应用场景
 
@@ -89,7 +90,7 @@ Clickhouse、Hbase、Redis、Mysql等存储引擎中，各种存储引擎存放�
 
 ### 2.3 实时数据体系建设方式
 
-整个实时数据体系分为两种建设方式，即**实时**和**准实时**(两种方式，它们的实现方式分别是基于流计算引擎和ETL、OLAP引擎，数据时效性则分别是**秒级**和**分钟级**。
+整个实时数据体系分为两种建设方式，即**实时**和**准实时**(它们的实现方式分别是基于流计算引擎和ETL、OLAP引擎，数据时效性则分别是**秒级**和**分钟级**。
 * 在**调度开销**方面，准实时数据是批处理过程，因此仍然需要调度系统支持，调度频率较高，而实时数据却没有调度开销；
 * 在**业务灵活性**方面，因为准实时数据是基于ETL或OLAP引擎实现，灵活性优于基于流计算的方式；
 * 在**对数据晚到的容忍度**方面，因为准实时数据可以基于一个周期内的数据进行全量计算，因此对于数据晚到的容忍度也是比较高的，而实时数据使用的是增量计算，对于数据晚到的容忍度更低一些；
@@ -105,10 +106,148 @@ Clickhouse、Hbase、Redis、Mysql等存储引擎中，各种存储引擎存放�
 实现高写入TPS、高查询QPS和低查询latency，从而做到全链路的实时化和SQL化，这样就可以用批的方式实现实时分析和按需分析，并能快速的响应业务的变化，两者配合，实现1 + 1 > 2的效果；
 **该架构对交互式分析引擎的要求非常高，也许是未来大数据库技术发展的一个重点和方向**。    
     
-为了应对业务方更复杂的多维实时数据分析需求，我们目前引入Kudu、ClickHouse两个OLAP存储引擎，对订单等业务数据使用presto + Kudu，流量数据使用clickhouse的技术解决方案，也是在探索流批一体架构在实时数据分析领域的可行性。
+为了应对业务方更复杂的多维实时数据分析需求，笔者目前在数据开发中引入Kudu这个OLAP存储引擎，对订单等业务数据使用Presto + Kudu的计算方案也是在探索流批一体架构在实时数据分析领域的可行性。
 此外，目前比较热的数据湖技术，如Delta lake、Hudi等支持在HDFS上进行upsert更新，随着其流式写入、SQL引擎支持的成熟，未来可以用一套存储引擎解决实时、离线数据需求，从而减少多引擎运维开发成本。
 
-## 三、参考资料
+## 三、Flink SQL实时计算UV指标
+
+上一部分从宏观层面介绍了如何建设实时数据体系，非常不接地气，大家都知道，在ToC的互联网公司，UV是一个很重要的指标，对于老板、商务、运营的决策有很大的影响，因此接下来用一个接地气的案例来介绍如何实时计算UV数据。
+由于笔者在电商公司，实时数据的重要性不言而喻，目前主要的工作就是计算UV、销售等各类实时数据，因此用一个简单demo演示如何用Flink SQL消费Kafka中的PV数据，实时计算出UV指标后写入Hbase。
+
+### 3.1 数据准备
+
+PV数据来源于埋点数据经FileBeat上报清洗后，以ProtoBuffer格式写入下游Kafka，消费时第一步就要先反序列化PB格式的数据为Flink能识别的Row类型，因此也就需要自定义实现DeserializationSchema接口，具体如下代码，
+这里只抽取计算用到的PV的mid、事件时间time_local，并从其解析得到log_date字段：
+```
+public class PageViewDeserializationSchema implements DeserializationSchema<Row> {
+
+    public static final Logger LOG = LoggerFactory.getLogger(PageViewDeserializationSchema.class);
+    protected SimpleDateFormat dayFormatter;
+
+    private final RowTypeInfo rowTypeInfo;
+
+    public PageViewDeserializationSchema(RowTypeInfo rowTypeInfo){
+        dayFormatter = new SimpleDateFormat("yyyyMMdd", Locale.UK);
+        this.rowTypeInfo = rowTypeInfo;
+    }
+    @Override
+    public Row deserialize(byte[] message) throws IOException {
+        Row row = new Row(rowTypeInfo.getArity());
+        MobilePage mobilePage = null;
+        try {
+            mobilePage = MobilePage.parseFrom(message);
+            String mid = mobilePage.getMid();
+            row.setField(0, mid);
+            Long timeLocal = mobilePage.getTimeLocal();
+            String logDate = dayFormatter.format(timeLocal);
+            row.setField(1, logDate);
+            row.setField(2, timeLocal);
+        }catch (Exception e){
+            String mobilePageError = (mobilePage != null) ? mobilePage.toString() : "";
+            LOG.error("error parse bytes payload is {}, pageview error is {}", message.toString(), mobilePageError, e);
+        }
+        return null;
+    }
+```
+
+### 3.2 编写Job主程序
+
+将PV数据解析为Flink的Row类型后，接下来就很简单了，编写主函数，写SQL就能统计UV指标了，代码如下：
+```
+public class RealtimeUV {
+
+    public static void main(String[] args) throws Exception {
+        //step1 从properties配置文件中解析出需要的Kakfa、Hbase配置信息、checkpoint参数信息
+        Map<String, String> config = PropertiesUtil.loadConfFromFile(args[0]);
+        String mobliePv = config.get("source.kafka.topic");
+        String groupId = config.get("source.group.id");
+        String sourceBootStrapServers = config.get("source.bootstrap.servers");
+        String hbaseTable = config.get("hbase.table.name");
+        String hbaseZkQuorum = config.get("hbase.zk.quorum");
+        String hbaseZkParent = config.get("hbase.zk.parent");
+        int checkPointPeriod = Integer.parseInt(config.get("checkpoint.period"));
+        int checkPointTimeout = Integer.parseInt(config.get("checkpoint.timeout"));
+
+        StreamExecutionEnvironment sEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+        //step2 设置Checkpoint相关参数，用于Failover容错
+        sEnv.getConfig().registerTypeWithKryoSerializer(MobilePage.class,
+                ProtobufSerializer.class);
+        sEnv.getCheckpointConfig().setFailOnCheckpointingErrors(false);
+        sEnv.getCheckpointConfig().setMaxConcurrentCheckpoints(1);
+        sEnv.enableCheckpointing(checkPointPeriod, CheckpointingMode.EXACTLY_ONCE);
+        sEnv.getCheckpointConfig().setCheckpointTimeout(checkPointTimeout);
+        sEnv.getCheckpointConfig().enableExternalizedCheckpoints(
+                CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
+
+        //step3 使用Blink planner、创建TableEnvironment,并且设置状态过期时间，避免Job OOM
+        EnvironmentSettings environmentSettings = EnvironmentSettings.newInstance()
+                .useBlinkPlanner()
+                .inStreamingMode()
+                .build();
+        StreamTableEnvironment tEnv = StreamTableEnvironment.create(sEnv, environmentSettings);
+        tEnv.getConfig().setIdleStateRetentionTime(Time.days(1), Time.days(2));
+
+        Properties sourceProperties = new Properties();
+        sourceProperties.setProperty("bootstrap.servers", sourceBootStrapServers);
+        sourceProperties.setProperty("auto.commit.interval.ms", "3000");
+        sourceProperties.setProperty("group.id", groupId);
+
+        //step4 初始化KafkaTableSource的Schema信息，笔者这里使用register TableSource的方式将源表注册到Flink中，而没有用register DataStream方式，也是因为想熟悉一下如何注册KafkaTableSource到Flink中
+        TableSchema schema = TableSchemaUtil.getAppPageViewTableSchema();
+        Optional<String> proctimeAttribute = Optional.empty();
+        List<RowtimeAttributeDescriptor> rowtimeAttributeDescriptors = Collections.emptyList();
+        Map<String, String> fieldMapping = new HashMap<>();
+        List<String> columnNames = new ArrayList<>();
+        RowTypeInfo rowTypeInfo = new RowTypeInfo(schema.getFieldTypes(), schema.getFieldNames());
+        columnNames.addAll(Arrays.asList(schema.getFieldNames()));
+        columnNames.forEach(name -> fieldMapping.put(name, name));
+        PageViewDeserializationSchema deserializationSchema = new PageViewDeserializationSchema(
+                rowTypeInfo);
+        Map<KafkaTopicPartition, Long> specificOffsets = new HashMap<>();
+        Kafka011TableSource kafkaTableSource = new Kafka011TableSource(
+                schema,
+                proctimeAttribute,
+                rowtimeAttributeDescriptors,
+                Optional.of(fieldMapping),
+                mobliePv,
+                sourceProperties,
+                deserializationSchema,
+                StartupMode.EARLIEST,
+                specificOffsets);
+        tEnv.registerTableSource("pageview", kafkaTableSource);
+
+        //step5 初始化Hbase TableSchema、写入参数，并将其注册到Flink中
+        HBaseTableSchema hBaseTableSchema = new HBaseTableSchema();
+        hBaseTableSchema.setRowKey("log_date", String.class);
+        hBaseTableSchema.addColumn("f", "UV", Long.class);
+        HBaseOptions hBaseOptions = HBaseOptions.builder()
+                .setTableName(hbaseTable)
+                .setZkQuorum(hbaseZkQuorum)
+                .setZkNodeParent(hbaseZkParent)
+                .build();
+        HBaseWriteOptions hBaseWriteOptions = HBaseWriteOptions.builder()
+                .setBufferFlushMaxRows(1000)
+                .setBufferFlushIntervalMillis(1000)
+                .build();
+        HBaseUpsertTableSink hBaseSink = new HBaseUpsertTableSink(hBaseTableSchema, hBaseOptions, hBaseWriteOptions);
+        tEnv.registerTableSink("uv_index", hBaseSink);
+
+        //step6 实时计算当天UV指标sql, 这里使用最简单的group by agg，没有使用minibatch或窗口，在大数据量优化时最好使用后两种方式
+        String uvQuery = "insert into uv_index "
+                + "select log_date,\n"
+                + "ROW(count(distinct mid) as UV)\n"
+                + "from pageview\n"
+                + "group by log_date";
+        tEnv.sqlUpdate(uvQuery);
+        //step7 执行Job
+        sEnv.execute("UV Job");
+    }
+}
+```
+以上就是一个简单的使用Flink SQL统计UV的case, 代码非常简单，只需要理清楚如何解析Kafka中数据，如何初始化Table Schema，以及如何将表注册到Flink中，即可使用Flink SQL完成各种复杂的实时数据统计类的业务需求，学习成本比API的方式低很多。
+说明一下，笔者这个demo是基于目前业务场景而开发的，在生产环境中可以真实运行起来，可能不能拆箱即用，你需要结合自己的业务场景自定义相应的kafka数据解析类。
+
+## 四、参考资料
 
 1. [Flink Use Cases](https://flink.apache.org/usecases.html)
 2. [基于Flink的严选实时数仓实践](https://mp.weixin.qq.com/s/6UFrWoGf2e6kVC5UAK1JIQ)
