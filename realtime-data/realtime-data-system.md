@@ -114,7 +114,7 @@ Clickhouse、Hbase、Redis、Mysql等存储引擎中，各种存储引擎存放�
 上一部分从宏观层面介绍了如何建设实时数据体系，非常不接地气，大家都知道，在ToC的互联网公司，UV是一个很重要的指标，对于老板、商务、运营的决策有很大的影响，因此接下来用一个接地气的案例来介绍如何实时计算UV数据。
 由于笔者在电商公司，实时数据的重要性不言而喻，目前主要的工作就是计算UV、销售等各类实时数据，因此用一个简单demo演示如何用Flink SQL消费Kafka中的PV数据，实时计算出UV指标后写入Hbase。
 
-### 3.1 数据准备
+### 3.1 Kafka源数据解析
 
 PV数据来源于埋点数据经FileBeat上报清洗后，以ProtoBuffer格式写入下游Kafka，消费时第一步就要先反序列化PB格式的数据为Flink能识别的Row类型，因此也就需要自定义实现DeserializationSchema接口，具体如下代码，
 这里只抽取计算用到的PV的mid、事件时间time_local，并从其解析得到log_date字段：
@@ -150,7 +150,7 @@ public class PageViewDeserializationSchema implements DeserializationSchema<Row>
     }
 ```
 
-### 3.2 编写Job主程序
+### 3.2 编写Flink Job主程序
 
 将PV数据解析为Flink的Row类型后，接下来就很简单了，编写主函数，写SQL就能统计UV指标了，代码如下：
 ```
