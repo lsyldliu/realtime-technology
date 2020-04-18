@@ -160,7 +160,7 @@ public class RealtimeUV {
     public static void main(String[] args) throws Exception {
         //step1 从properties配置文件中解析出需要的Kakfa、Hbase配置信息、checkpoint参数信息
         Map<String, String> config = PropertiesUtil.loadConfFromFile(args[0]);
-        String mobliePv = config.get("source.kafka.topic");
+        String topic = config.get("source.kafka.topic");
         String groupId = config.get("source.group.id");
         String sourceBootStrapServers = config.get("source.bootstrap.servers");
         String hbaseTable = config.get("hbase.table.name");
@@ -210,7 +210,7 @@ public class RealtimeUV {
                 proctimeAttribute,
                 rowtimeAttributeDescriptors,
                 Optional.of(fieldMapping),
-                mobliePv,
+                topic,
                 sourceProperties,
                 deserializationSchema,
                 StartupMode.EARLIEST,
